@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+
+# Written into the repository at runtime by other tools.
+.rindo/
+.spar/
+.groundtruth/

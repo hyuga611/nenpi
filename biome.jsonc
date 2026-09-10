@@ -1,0 +1,23 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.8/schema.json",
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "style": {
+        // This file builds its output by concatenation on purpose. Template strings
+        // swallow backslashes in Windows paths, and the tables read better as `+`.
+        "useTemplate": "off"
+      },
+      "suspicious": {
+        // `while ((m = re.exec(s)))` is the idiom used throughout for regex scans.
+        "noAssignInExpressions": "off",
+        // Test fixtures contain literal `${R}` from real hook commands.
+        "noTemplateCurlyInString": "off"
+      }
+    }
+  },
+  "files": {
+    "includes": ["src/**", "test/**"]
+  }
+}
