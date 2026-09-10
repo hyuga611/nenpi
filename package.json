@@ -1,6 +1,6 @@
 {
   "name": "@hyuga/nenpi",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Where a Claude Code session actually burns its tokens. Attributes cache_read spend to the tool output that caused it (residency cost), measures whether your hooks changed anything, and nudges in-session. Zero-dependency, reads only local transcripts.",
   "type": "module",
   "main": "src/nenpi.mjs",
