@@ -236,7 +236,7 @@ test('英語の訂正も数える（大文字小文字・アポストロフィ�
   assert.equal(a.corrections, 1);
 });
 
-test('出力言語は NENPI_LANG → ロケール → 英語の順で決まる', () => {
+test('出力言語は NENPI_LANG → ロケール変数 → OS ロケール → 英語の順で決まる', () => {
   const saved = { ...process.env };
   try {
     process.env.NENPI_LANG = 'en';
@@ -250,8 +250,11 @@ test('出力言語は NENPI_LANG → ロケール → 英語の順で決まる',
     assert.equal(t('yes', 'はい'), 'はい');
     process.env.LANG = 'en_US.UTF-8';
     assert.equal(t('yes', 'はい'), 'yes');
+    // No locale variable at all: fall back to the OS locale, which is where Windows
+    // lives — it sets none of these. English only if that is not Japanese either.
     delete process.env.LANG;
-    assert.equal(t('yes', 'はい'), 'yes');
+    const os = Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase();
+    assert.equal(t('yes', 'はい'), os.startsWith('ja') ? 'はい' : 'yes');
   } finally {
     for (const k of ['NENPI_LANG', 'LANG', 'LC_ALL', 'LC_MESSAGES']) {
       if (k in saved) process.env[k] = saved[k]; else delete process.env[k];

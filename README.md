@@ -6,8 +6,19 @@ If you want the bill, use [ccusage](https://github.com/ryoppippi/ccusage) — it
 
 Zero dependencies. Reads only the JSONL transcripts already on your disk under `~/.claude/projects/`. Nothing is uploaded anywhere.
 
+## Install
+
+Node 18 or newer. Run it without installing:
+
 ```
 npx @hyuga/nenpi report
+```
+
+Or install it, which also puts `nenpi` on your PATH for the hooks below:
+
+```
+npm i -g @hyuga/nenpi
+nenpi report
 ```
 
 ## What it shows
@@ -85,23 +96,25 @@ The same file is three Claude Code hooks. They are the point where measurement t
 | `nenpi hook prompt` | `UserPromptSubmit` | Shows what re-reading the current context costs per turn. It never says "the context is too long" — that claim did not hold up in the measurements. Whether to `/clear` is a human call, made on whether the subject changed. |
 | `nenpi hook post` | `PostToolUse` | When the same tool has run one call at a time for several turns straight, says so once, at the moment it happens. Whether the calls actually depend on each other is left to the model. |
 
-In `~/.claude/settings.json`:
+In `~/.claude/settings.json`, with `nenpi` on your PATH (`npm i -g @hyuga/nenpi`):
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
-      { "matcher": "Read", "hooks": [{ "type": "command", "command": "node /path/to/nenpi/src/nenpi.mjs hook pre" }] }
+      { "matcher": "Read", "hooks": [{ "type": "command", "command": "nenpi hook pre" }] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "node /path/to/nenpi/src/nenpi.mjs hook prompt" }] }
+      { "hooks": [{ "type": "command", "command": "nenpi hook prompt" }] }
     ],
     "PostToolUse": [
-      { "hooks": [{ "type": "command", "command": "node /path/to/nenpi/src/nenpi.mjs hook post" }] }
+      { "hooks": [{ "type": "command", "command": "nenpi hook post" }] }
     ]
   }
 }
 ```
+
+Running from a clone instead: `node /path/to/nenpi/src/nenpi.mjs hook pre`.
 
 Every hook fails open: on any error it exits 0 and says nothing.
 
@@ -151,7 +164,7 @@ Being straight about this matters more than the numbers looking precise.
 
 - **`BYTES_PER_TOK = 3.5`** — tool output is measured in bytes and converted to tokens with this ratio. It is a rough average for mixed Japanese and English; adjust your reading of `injected` and residency accordingly.
 - **`IMG_TOK = 1600`** — one image block is counted as this many tokens.
-- **Weights `W = { in: 1, write: 1.25, read: 0.1, out: 5 }`** — token classes are converted to "input-token equivalents" so a single number can rank them. These follow Anthropic's published price ratios. `quality` prints a **calibration residual**: it derives a unit price from the real `costUSD` and reports how far off the weighted model is. On this machine that residual runs around 1%. If yours is large, the weights do not match your plan and the weighted percentages should be read as rough.
+- **Weights `W = { in: 1, write: 1.25, read: 0.1, out: 5 }`** — token classes are converted to "input-token equivalents" so a single number can rank them. These follow Anthropic's published price ratios. `quality` prints a **calibration residual**: it derives a unit price from the real `costUSD` and reports how far off the weighted model is. On the author's machine that residual runs around 1%. If yours is large, the weights do not match your plan and the weighted percentages should be read as rough.
 
 So: **charges are measured from `usage`; the attribution of those charges to individual tools is estimated.** Residency cost is the estimated half. It is still the most useful number here, because nothing else points at *which* output is the expensive one — but it is an estimate, and treating it as one is the right call.
 
@@ -181,7 +194,16 @@ npx @hyuga/nenpi report --lang ja
 
 毎ターン、文脈は丸ごと再送される。だからツールの出力は1回課金されるのではなく、**そのあとに続いたターンの数だけ**課金される。**滞在コスト = 投入トークン × それ以降のターン数**。これで並べ替えると、金食い虫が推測ではなくなる。
 
-上の例では Bash の出力は本文としては 2.4M tok だが、滞在コストは 1669M。早い時点で入ってそのまま居座ったからで、日別の金額レポートでは絶対に指を差せない。
+```
+## 滞在コスト（投入tok × それ以降のターン数）= cache_read の実体
+     滞在    割合   回数   投入tok    平均  画像  ツール
+    1669M  81.4%   5586     2.4M     432     0  Bash
+     231M  11.3%    229     0.3M    1474   163  Read
+      43M   2.1%     64     0.1M     950    34  mcp__claude-in-chrome__computer
+      17M   0.8%    372     0.0M      55     0  Write
+```
+
+Bash の出力は本文としては 2.4M tok だが、滞在コストは 1669M。早い時点で入ってそのまま居座ったからで、日別の金額レポートでは絶対に指を差せない。
 
 ## そのほか
 
@@ -198,6 +220,10 @@ npx @hyuga/nenpi report --lang ja
 - **`hook post`（PostToolUse）** — 同じツールを何ターンも1本ずつ撃っていたら、その場で一度だけ言う。依存しているかどうかの判断はモデルに残す。
 
 設定例は英語側の JSON を参照。すべてのフックは fail-open で、何かあれば黙って exit 0 する。
+
+## 基準
+
+`nenpi baseline` は今の数字を留め、次回の `report` と `quality` がそこからの差分を出す。**前の基準は上書きされる**ので、毎回走らせるものではない。「ここから測りたい」と決めたときだけ打つ。状態は `~/.claude/nenpi/`（`NENPI_STATE_DIR` で移せる）。
 
 ## 実測と推定の線引き
 

@@ -36,11 +36,15 @@ const W = { in: 1, write: 1.25, read: 0.1, out: 5 }; // weights, in input-token 
 
 // Output language. English unless NENPI_LANG (or --lang) says otherwise, or the OS
 // locale is Japanese. Resolved per call so --lang and tests can change it at runtime.
+// Windows sets none of the POSIX locale variables, so Intl is the fallback there.
 function lang() {
   const v = (process.env.NENPI_LANG || '').toLowerCase();
   if (v.startsWith('ja')) return 'ja';
   if (v.startsWith('en')) return 'en';
-  const loc = (process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || '').toLowerCase();
+  let loc = (process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || '').toLowerCase();
+  if (!loc) {
+    try { loc = Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase(); } catch { loc = ''; }
+  }
   return loc.startsWith('ja') ? 'ja' : 'en';
 }
 export const t = (en, ja) => (lang() === 'ja' ? ja : en);
@@ -277,7 +281,7 @@ function report(days) {
   if (!a.turns) { console.log(t('no sessions in this window', '対象セッションなし')); return; }
   const u = a.usage;
   const eq = u.in * W.in + u.write * W.write + u.read * W.read + u.out * W.out;
-  console.log('# nenpi — ' + t('last ' + days + ' days / ' + a.files + ' sessions / ' + a.turns.toLocaleString() + ' turns',
+  console.log('# nenpi — ' + t('last ' + days + (days === 1 ? ' day' : ' days') + ' / ' + a.files + ' sessions / ' + a.turns.toLocaleString() + ' turns',
     '直近' + days + '日 / ' + a.files + 'セッション / ' + a.turns.toLocaleString() + 'ターン'));
   console.log('');
   printDiff(indicators(a), days);
@@ -1113,7 +1117,7 @@ function errors(days, asJson, splitArg) {
   }
   if (asJson) { console.log(JSON.stringify(errorsJson(scanErrors(days)), null, 2)); return; }
   const a = scanErrors(days);
-  console.log('# nenpi errors — ' + t('last ' + days + ' days / ' + a.sessions + ' sessions',
+  console.log('# nenpi errors — ' + t('last ' + days + (days === 1 ? ' day' : ' days') + ' / ' + a.sessions + ' sessions',
     '直近' + days + '日 / ' + a.sessions + 'セッション'));
   console.log('');
   if (!Number.isNaN(split)) {
@@ -1148,7 +1152,7 @@ function errors(days, asJson, splitArg) {
 
 function effect(days) {
   const r = scanEffect(days);
-  console.log('# nenpi effect — ' + t('last ' + days + ' days / ' + r.sessions + ' sessions where a nudge fired',
+  console.log('# nenpi effect — ' + t('last ' + days + (days === 1 ? ' day' : ' days') + ' / ' + r.sessions + ' sessions where a nudge fired',
     '直近' + days + '日 / 口出しが出た ' + r.sessions + ' セッション'));
   console.log('');
   if (!r.sessions) {
@@ -1216,7 +1220,7 @@ function quality(days, asJson) {
   if (asJson) { console.log(JSON.stringify(summaryJson(a, days), null, 2)); return; }
 
   console.log('# nenpi quality — ' + t(
-    'last ' + days + ' days / ' + a.sessions + ' sessions / ' + a.turns.toLocaleString() + ' turns',
+    'last ' + days + (days === 1 ? ' day' : ' days') + ' / ' + a.sessions + ' sessions / ' + a.turns.toLocaleString() + ' turns',
     '直近' + days + '日 / ' + a.sessions + 'セッション / ' + a.turns.toLocaleString() + 'ターン'));
   console.log('');
   printVerdict(summaryJson(a, days), days);

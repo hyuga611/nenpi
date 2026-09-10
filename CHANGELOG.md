@@ -12,8 +12,9 @@ it publishable is listed below.
 ### Added
 
 - **English output.** All output is bilingual. The language is chosen by `--lang en|ja`,
-  then `NENPI_LANG`, then the OS locale (`LC_ALL` / `LC_MESSAGES` / `LANG`), defaulting
-  to English.
+  then `NENPI_LANG`, then the locale variables (`LC_ALL` / `LC_MESSAGES` / `LANG`), then
+  the OS locale reported by `Intl` — Windows sets none of the variables — defaulting to
+  English.
 - **English correction phrases.** The user-correction rate in `quality` used to detect
   Japanese phrasing only, so it silently read 0% for everyone else. English phrases are
   now matched too, case-insensitively.
