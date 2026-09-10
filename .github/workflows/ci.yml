@@ -1,0 +1,46 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    # package.json declares engines >=18, so all four are checked. There are no
+    # dependencies and no lockfile, so there is nothing to install.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18.x', '20.x', '22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  windows:
+    # Most of the machines this runs on are Windows, and Windows is where it
+    # differs: no POSIX locale variables, backslash paths, and `node --test dir`
+    # does not resolve the way it does elsewhere.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.x'
+      - run: npm test
+      # The language must follow the OS locale even where LANG is unset, and
+      # --lang must still override it.
+      - run: node src/nenpi.mjs help
+      - run: node src/nenpi.mjs help --lang en
+
+  lint:
+    # Correctness rules only, no formatter. biome.jsonc records which rules are
+    # off and why.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.x'
+      - run: npm run lint

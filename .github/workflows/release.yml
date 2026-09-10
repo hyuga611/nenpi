@@ -1,0 +1,134 @@
+name: Release
+
+# Publishing by hand works until the day it does not: the tag says one version,
+# package.json says another, and the tarball that reached everyone was built from
+# a working tree nobody can reconstruct. This runs the tests first, refuses to
+# publish anything whose version numbers disagree, and attaches provenance so that
+# "this package came from this commit" is a checkable statement rather than
+# something the reader has to take on trust.
+#
+# One package, so the tag is a plain v<version>: v0.1.0.
+#
+# Publishing uses npm trusted publishing: no token is stored anywhere. It needs a
+# one-time setup on npmjs.com, under the package's Settings -> Trusted publisher,
+# naming this repository and this workflow file. A name that has never been
+# published has nothing to attach that setting to, so 0.1.0 goes up by hand once;
+# every version after that comes from here.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run the checks, but do not publish'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.target.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.x'
+
+      - name: Which version is this tag for
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION=""
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "releasing ${VERSION:-(dispatch, no version)}"
+
+      - name: The tag and package.json must agree
+        if: steps.target.outputs.version != ''
+        env:
+          VERSION: ${{ steps.target.outputs.version }}
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          echo "tag=$VERSION package.json=$PKG"
+          test "$VERSION" = "$PKG" || {
+            echo "::error::tag says $VERSION, package.json says $PKG"; exit 1; }
+
+      - run: npm test
+      - run: npm run lint
+
+      # The published tarball is a security surface of its own. This tool reads
+      # transcripts and writes baselines, so a stray state file or transcript
+      # fixture would be republished to everyone who installs.
+      - name: The tarball must carry src and nothing else
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const files = require("/tmp/pack.json")[0].files.map(f => f.path);
+            console.log(files.join("\n"));
+            const allowed = /^(src\/|package\.json$|README\.md$|LICENSE$|CHANGELOG\.md$)/;
+            const bad = files.filter(f => !allowed.test(f));
+            if (bad.length) { console.error("::error::unexpected in the tarball: " + bad.join(", ")); process.exit(1); }
+          '
+
+      # Everything above runs against the working tree, where node resolves
+      # anything that is on disk. That is not the machine the package lands on.
+      # This packs it, installs the tarball into an empty project, imports the
+      # subpath the package claims to export, and starts the bin it declares.
+      - name: Install it the way somebody else would, and use it
+        run: |
+          TARBALL="$PWD/$(npm pack --silent)"
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$TARBALL"
+          node -e 'import("@hyuga/nenpi").then(m => {
+            const missing = ["t", "envInt", "CORRECTION_WORDS"].filter(k => !(k in m));
+            if (missing.length) { console.error("not exported: " + missing.join(", ")); process.exit(1); }
+            console.log("exports ok: " + Object.keys(m).length);
+          })'
+          ./node_modules/.bin/nenpi help
+          # A hook that throws is a hook that silently stops counting, so the
+          # entry point is started too, with an event on stdin the way Claude
+          # Code sends it.
+          echo '{"session_id":"smoke","cwd":"/tmp/smoke","prompt":"hello"}' | ./node_modules/.bin/nenpi hook prompt
+
+  publish:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/') && !inputs.dry_run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to create the GitHub release
+      id-token: write   # to sign the provenance attestation
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Provenance and trusted publishing both need a recent npm; the version
+      # bundled with the runner's Node is not always new enough.
+      - run: npm install -g npm@latest
+
+      # No NODE_AUTH_TOKEN on purpose. A long-lived npm token in a repository
+      # secret can publish as you from anywhere, forever, and it only has to leak
+      # once. With a trusted publisher configured, npm verifies this workflow's
+      # short-lived OIDC identity instead and there is nothing to leak.
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md) for what changed.
+
+          Published with [provenance](https://docs.npmjs.com/generating-provenance-statements): the npm package is attested to have been built from this commit by this workflow." \
+            --verify-tag

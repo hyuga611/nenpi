@@ -11,7 +11,8 @@
     "nenpi": "src/nenpi.mjs"
   },
   "files": [
-    "src"
+    "src",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test test/nenpi.test.mjs",
