@@ -1644,6 +1644,10 @@ if (isMain) {
   else if (cmd === 'errors') errors(days, process.argv.includes('--json'), (() => { const i = process.argv.indexOf('--split'); return i > -1 ? process.argv[i + 1] : null; })());
   else if (cmd === 'report' || !cmd) report(days);
   else {
+    // The same text answers `nenpi help` and a command nobody has. Only the
+    // second one is an error, so only the second one says so and exits non-zero.
+    const asked = cmd === 'help' || cmd === '--help' || cmd === '-h';
+    if (!asked) console.error(t('unknown command: ', '知らないコマンド: ') + cmd + '\n');
     console.log('usage: nenpi <command> [options]');
     console.log('');
     console.log('  report     ' + t('where the tokens went, diffed against the baseline', '何にトークンが燃えたか。基準があれば差分も出す'));
@@ -1658,6 +1662,6 @@ if (isMain) {
     console.log('  --lang     ' + t('en or ja (also NENPI_LANG)', 'en か ja（環境変数 NENPI_LANG も可）'));
     console.log('  --json     ' + t('machine-readable output (quality, errors)', '機械可読な出力（quality / errors）'));
     console.log('  --split T  ' + t('errors: compare before and after a timestamp', 'errors: ある時刻の前後で比べる'));
-    process.exit(1);
+    process.exit(asked ? 0 : 1);
   }
 }
