@@ -30,6 +30,19 @@ const HOME = os.homedir();
 const PROJECTS = path.join(HOME, '.claude', 'projects');
 const STATE_DIR = process.env.NENPI_STATE_DIR || path.join(HOME, '.claude', 'nenpi'); // baseline + nudge state
 try { fs.mkdirSync(STATE_DIR, { recursive: true }); } catch { /* read-only paths still work */ }
+
+// Before 0.1.0 the state lived in ~/.claude/tools. Reads fall back there, so an
+// upgrade does not silently lose the baseline you have been measuring against —
+// `nenpi baseline` would be the obvious way to make the message go away, and it
+// overwrites the very thing that was missing. Writes always go to STATE_DIR.
+const LEGACY_STATE_DIR = path.join(HOME, '.claude', 'tools');
+export function readStateFrom(dirs, name) {
+  for (const dir of dirs) {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch { /* try the next */ }
+  }
+  return null;
+}
+export const readState = (name) => readStateFrom([STATE_DIR, LEGACY_STATE_DIR], name);
 const IMG_TOK = 1600;        // rough token cost of one image block
 const BYTES_PER_TOK = 3.5;   // rough bytes-per-token for mixed Japanese and English
 const W = { in: 1, write: 1.25, read: 0.1, out: 5 }; // weights, in input-token equivalents
@@ -224,7 +237,8 @@ function fmtVal(v, unit) {
 
 function printDiff(now, nowDays) {
   let prev;
-  try { prev = JSON.parse(fs.readFileSync(BASELINE, 'utf8')); } catch { return; }
+  prev = readState('nenpi-baseline.json');
+  if (!prev) return;
   if ((prev.calc || 1) !== CALC) {
     console.log('## ' + t('Baseline comparison — not possible', '基準との比較 — できない'));
     console.log('  ' + t('The baseline (' + prev.savedAt.slice(0, 10) + ') was computed with v' + (prev.calc || 1)
@@ -889,8 +903,8 @@ const vnum = (v, unit) => {
 };
 
 function printVerdict(now, days) {
-  let base;
-  try { base = JSON.parse(fs.readFileSync(QBASE, 'utf8')); } catch { 
+  const base = readState('nenpi-quality-baseline.json');
+  if (!base) {
     console.log('## ' + t('Verdict', '判定'));
     console.log('  ' + t('No baseline yet. Freeze the current numbers with `nenpi baseline --days ' + days
       + '` and the next run will show a diff.',
@@ -1515,7 +1529,7 @@ function hookPrompt() {
       const tp = ev.transcript_path || ev.transcriptPath;
       if (id && tp && !muted(ev.cwd)) {
         let st = {};
-        try { st = JSON.parse(fs.readFileSync(NUDGE_STATE, 'utf8')); } catch { st = {}; }
+        st = readState(path.basename(NUDGE_STATE)) || {};
         out = nudgeDecide(st, id, lastContext(tailLines(tp)));
         try { fs.writeFileSync(NUDGE_STATE, JSON.stringify(st)); } catch { /* noop */ }
       }
@@ -1607,7 +1621,7 @@ function hookPost() {
         const { turns } = foldResponses(tailLines(tp, BUNDLE_TAIL));
         const run = bundleVerdict(turns, ev.tool_use_id || ev.toolUseId);
         let st = {};
-        try { st = JSON.parse(fs.readFileSync(BUNDLE_STATE, 'utf8')); } catch { st = {}; }
+        st = readState(path.basename(BUNDLE_STATE)) || {};
         out = bundleDecide(st, id, run);
         try { fs.writeFileSync(BUNDLE_STATE, JSON.stringify(st)); } catch { /* noop */ }
       }

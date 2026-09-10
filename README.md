@@ -139,7 +139,7 @@ nenpi hook pre|prompt|post   hook entry points (event JSON on stdin)
 
 ## Configuration
 
-All state lives in `~/.claude/nenpi/` (`NENPI_STATE_DIR` to move it). Every threshold can be overridden from the environment, so hooks can be tuned per machine without editing the source:
+All state lives in `~/.claude/nenpi/` (`NENPI_STATE_DIR` to move it). If you have an older install, whatever is still in `~/.claude/tools/` is read from there until the new location has its own copy. Every threshold can be overridden from the environment, so hooks can be tuned per machine without editing the source:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

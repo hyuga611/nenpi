@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.2 — 2026-09-10
+
+### Fixed
+
+- **An upgrade no longer loses the baseline.** State moved to `~/.claude/nenpi/` in
+  0.1.0, and anyone upgrading found `report` and `quality` reporting no baseline at all
+  while their old one sat untouched in `~/.claude/tools/`. Reads now fall back to the old
+  directory; writes still go to the new one. This matters because the obvious way to make
+  the message go away is `nenpi baseline`, which overwrites the very thing that was
+  missing. The nudge and bundle ledgers carry over the same way, so upgrading no longer
+  restarts the nudge cadence either.
+
 ## 0.1.1 — 2026-09-10
 
 ### Fixed

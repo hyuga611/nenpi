@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   analyzeSession, mergeQuality, sessionRate, summaryJson,
   bandOf, bandLabel, BANDS, CORRECTION_WORDS, injectedText,
-  t, envInt,
+  t, envInt, readStateFrom,
   lastContext, nudgeDecide, nudgeText, rateFor, tailLines,
   bundleVerdict, bundleDecide,
   fuel, verdict, VROWS,
@@ -234,6 +234,24 @@ test('英語の訂正も数える（大文字小文字・アポストロフィ�
   ]);
   assert.equal(a.userPrompts, 2);
   assert.equal(a.corrections, 1);
+});
+
+test('状態は新しい置き場を先に見て、無ければ旧 tools/ に落ちる', () => {
+  const now = fs.mkdtempSync(path.join(os.tmpdir(), 'nenpi-now-'));
+  const old = fs.mkdtempSync(path.join(os.tmpdir(), 'nenpi-old-'));
+  fs.writeFileSync(path.join(old, 'nenpi-baseline.json'), JSON.stringify({ where: 'old' }));
+
+  // 移行直後：新しい方はまだ空なので、旧い基準がそのまま読める
+  assert.deepEqual(readStateFrom([now, old], 'nenpi-baseline.json'), { where: 'old' });
+
+  // 一度でも新しい方に書かれたら、そちらが勝つ
+  fs.writeFileSync(path.join(now, 'nenpi-baseline.json'), JSON.stringify({ where: 'new' }));
+  assert.deepEqual(readStateFrom([now, old], 'nenpi-baseline.json'), { where: 'new' });
+
+  // どこにも無い、あるいは壊れている場合は null。例外は投げない
+  assert.equal(readStateFrom([now, old], 'nenpi-nope.json'), null);
+  fs.writeFileSync(path.join(now, 'broken.json'), '{');
+  assert.equal(readStateFrom([now, old], 'broken.json'), null);
 });
 
 test('出力言語は NENPI_LANG → ロケール変数 → OS ロケール → 英語の順で決まる', () => {
