@@ -677,8 +677,12 @@ test('言うのは手前が揃ったときだけ。一度言ったら 20 呼び�
   const fire = (run) => { now += 5000; return bundleDecide(st, 's', run, now); };
   assert.equal(fire(''), '');
   const msg = fire('Bash');
-  assert.match(msg, /^\[nenpi\] Bash が 3/);
-  assert.match(msg, /依存しているならこのまま/);
+  assert.match(msg, /^\[nenpi\] Bash 1本ずつ3回/);
+  assert.match(msg, /決まっているなら同じターンに/);
+  // 本文は以後のターンぶん再送される。費用は長さ×残りターン数なので、言い回しを伸ばさない。
+  // ツール名は長さがまちまちなので（MCP 名は30字を超える）、地の文だけを測る。
+  const wording = msg.length - 'Bash'.length;
+  assert.ok(wording <= 40, '言い回しが長い: ' + wording + '字 — ' + msg);
   for (let i = 0; i < 20; i++) assert.equal(fire('Bash'), '');
   assert.match(fire('Edit'), /Edit/);
 });

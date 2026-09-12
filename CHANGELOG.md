@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.3 — 2026-09-12
+
+### Changed
+
+- **The bundle nudge is a third of its former length.** The text a PostToolUse hook
+  prints is written into the transcript, so it is re-read on every turn that follows it
+  — its real cost is length times the number of turns left, not length once. At the old
+  85 tokens, a session had to save more than about 400 turns of context for the nudge to
+  pay for itself, which made it net-negative in exactly the long sessions that carry most
+  of the spend. It now reads `Bash x3 one at a time. If the next call is already decided,
+  same turn.` (~35 tokens), moving break-even out to roughly 1,400 turns. The reasoning
+  clause and the explicit "if each depends on the last, carry on" are gone; the latter is
+  carried by the positive condition instead. Firing cadence is unchanged —
+  `NENPI_BUNDLE_RUN`, `NENPI_BUNDLE_COOLDOWN` and `NENPI_BUNDLE_MAX` keep their defaults,
+  and `nenpi effect` matches nudges by hook command rather than by text, so comparisons
+  against earlier sessions still line up.
+
 ## 0.1.2 — 2026-09-10
 
 ### Fixed

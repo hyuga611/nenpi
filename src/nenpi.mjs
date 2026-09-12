@@ -1598,13 +1598,11 @@ export function bundleDecide(state, id, runName, now = Date.now()) {
   if (!runName) return '';
   e.mute = BUNDLE_COOLDOWN;
   e.said = (e.said || 0) + 1;
+  // The text stays in the transcript and is re-read every turn after it, so its
+  // cost is length x remaining turns. Anything the reader can infer is cut.
   return '[nenpi] ' + t(
-    runName + ' has run one call at a time for ' + BUNDLE_RUN + ' turns straight. If the calls are '
-      + 'independent, send them in one turn (every extra turn re-sends the whole context). If each one '
-      + 'depends on the last, carry on.',
-    runName + ' が ' + BUNDLE_RUN
-      + 'ターン続けて1本ずつ。独立した呼びなら1ターンにまとめて撃つ'
-      + '（1ターン増やすたびに文脈が丸ごと再送される）。前の結果に依存しているならこのままでよい。');
+    runName + ' x' + BUNDLE_RUN + ' one at a time. If the next call is already decided, same turn.',
+    runName + ' 1本ずつ' + BUNDLE_RUN + '回。次に打つ先が決まっているなら同じターンに。');
 }
 
 function hookPost() {
