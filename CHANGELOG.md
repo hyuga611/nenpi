@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.4 — 2026-09-12
+
+### Added
+
+- **`nenpi top --anonymize`** (also `NENPI_ANONYMIZE=1`) replaces the project column
+  with `proj-<8 hex>` of itself. `top` is the only command that prints a name rather
+  than a number: the column is the directory under `~/.claude/projects/`, which is the
+  working directory with its separators flattened, so on a machine that does client
+  work the client's name is in it. The digest is stable across runs, so rows can still
+  be matched between one report and the next. It hides a name from a reader; it does
+  not withstand someone hashing a list of candidate names, so it is a guard against
+  pasting rather than a guarantee of anonymity.
+- **`top` says so when the flag is off**, in one line under the table. Nothing else
+  about the output changes, so existing scripts that read the rows are unaffected.
+- **README now states what leaves the machine** (nothing — no `fetch`, no `node:http`,
+  no `child_process`, no dependencies) and which commands print identifying text.
+
 ## 0.1.3 — 2026-09-12
 
 ### Changed

@@ -11,6 +11,7 @@ import {
   bundleVerdict, bundleDecide,
   fuel, verdict, VROWS,
   sparMode, muted,
+  anonymize, projectLabel,
   foldResponses,
   classifyError, tallyErrors, emptyErrors, errorsJson, ENV_ERROR_WORDS,
 } from '../src/nenpi.mjs';
@@ -794,5 +795,59 @@ test('envInt: 正の数値のときだけ環境変数を採る', () => {
     }
   } finally {
     if (saved === undefined) delete process.env.NENPI_TEST_INT; else process.env.NENPI_TEST_INT = saved;
+  }
+});
+
+test('projectLabel: 既定では作業ディレクトリ名をそのまま出す', () => {
+  const saved = process.env.NENPI_ANONYMIZE;
+  try {
+    delete process.env.NENPI_ANONYMIZE;
+    assert.equal(anonymize(), false);
+    assert.equal(projectLabel('X--01-client-acme-lp'), 'X--01-client-acme-lp');
+  } finally {
+    if (saved === undefined) delete process.env.NENPI_ANONYMIZE; else process.env.NENPI_ANONYMIZE = saved;
+  }
+});
+
+test('projectLabel: --anonymize のとき元の名前が1文字も残らない', () => {
+  const saved = process.env.NENPI_ANONYMIZE;
+  try {
+    process.env.NENPI_ANONYMIZE = '1';
+    assert.equal(anonymize(), true);
+    const raw = 'X--01-client-acme-lp';
+    const got = projectLabel(raw);
+    assert.match(got, /^proj-[0-9a-f]{8}$/);
+    for (const part of raw.split('-').filter((s) => s.length > 2)) {
+      assert.ok(!got.includes(part), part);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.NENPI_ANONYMIZE; else process.env.NENPI_ANONYMIZE = saved;
+  }
+});
+
+test('projectLabel: 同じ名前は毎回同じ値・違う名前は違う値', () => {
+  const saved = process.env.NENPI_ANONYMIZE;
+  try {
+    process.env.NENPI_ANONYMIZE = '1';
+    assert.equal(projectLabel('C--Users-a-dev-nenpi'), projectLabel('C--Users-a-dev-nenpi'));
+    assert.notEqual(projectLabel('C--Users-a-dev-nenpi'), projectLabel('C--Users-a-dev-orogami'));
+  } finally {
+    if (saved === undefined) delete process.env.NENPI_ANONYMIZE; else process.env.NENPI_ANONYMIZE = saved;
+  }
+});
+
+test('anonymize: 環境変数は真を表す値のときだけ効く', () => {
+  const saved = process.env.NENPI_ANONYMIZE;
+  try {
+    for (const on of ['1', 'true', 'TRUE', 'yes', 'on']) {
+      process.env.NENPI_ANONYMIZE = on;
+      assert.equal(anonymize(), true, on);
+    }
+    for (const off of ['', '0', 'false', 'no', 'off']) {
+      process.env.NENPI_ANONYMIZE = off;
+      assert.equal(anonymize(), false, off);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.NENPI_ANONYMIZE; else process.env.NENPI_ANONYMIZE = saved;
   }
 });

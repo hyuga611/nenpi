@@ -133,6 +133,7 @@ nenpi hook pre|prompt|post   hook entry points (event JSON on stdin)
 --lang      en or ja (also NENPI_LANG; defaults to your locale, else English)
 --json      machine-readable output (quality, errors)
 --split T   errors: compare before and after a timestamp
+--anonymize top: replace the project column with a digest (also NENPI_ANONYMIZE)
 ```
 
 `nenpi baseline` freezes the current numbers so the next `report` and `quality` show a diff. It overwrites the previous baseline, so take one deliberately — after a change you want to measure from, not on every run.
@@ -153,6 +154,15 @@ All state lives in `~/.claude/nenpi/` (`NENPI_STATE_DIR` to move it). If you hav
 | `NENPI_BUNDLE_COOLDOWN` | `20` | Tool calls of silence after it speaks. |
 | `NENPI_BUNDLE_MAX` | `8` | Cap per session — if 8 times did not help, stop saying it. |
 | `NENPI_LANG` | locale | `en` or `ja`. |
+| `NENPI_ANONYMIZE` | unset | `1` to hash the project column in `top`. |
+
+## What leaves your machine, and what the output contains
+
+Nothing leaves. There is no `fetch`, no `node:http`, no `child_process` anywhere in the source, and no dependencies through which one could arrive later. It reads the JSONL transcripts under `~/.claude/projects/` and writes only to `~/.claude/nenpi/` (a saved baseline and the nudges' cooldown counters).
+
+The part worth knowing is about the output rather than the tool. `report`, `quality`, `effect` and `errors` print tool names and numbers — nothing that identifies a project. **`top` prints one column that is a name: the directory under `~/.claude/projects/`, which is your working directory with its separators flattened.** On a machine that does client work, the client's name is in that path, so it is in that column.
+
+So `nenpi top --anonymize` replaces it with `proj-<8 hex>`, stable across runs so rows stay comparable. Without the flag, `top` says so in a line under the table. This hides a name from a reader; it will not stop someone who already has a list of candidate names and hashes them — it is a guard against pasting, not a guarantee of anonymity.
 
 ## How the numbers are made, and what is estimated
 
@@ -224,6 +234,14 @@ Bash の出力は本文としては 2.4M tok だが、滞在コストは 1669M�
 ## 基準
 
 `nenpi baseline` は今の数字を留め、次回の `report` と `quality` がそこからの差分を出す。**前の基準は上書きされる**ので、毎回走らせるものではない。「ここから測りたい」と決めたときだけ打つ。状態は `~/.claude/nenpi/`（`NENPI_STATE_DIR` で移せる）。
+
+## 外に出るもの・出力に含まれるもの
+
+外には何も出ない。ソースのどこにも `fetch` も `node:http` も `child_process` も無く、依存パッケージが無いので後から生える口も無い。読むのは `~/.claude/projects/` の JSONL、書くのは `~/.claude/nenpi/`（保存した基準と、口出しのクールダウン）だけ。
+
+知っておく価値があるのはツールではなく**出力のほう**。`report` / `quality` / `effect` / `errors` はツール名と数字しか出さない。**`top` だけは名前の列を持つ——`~/.claude/projects/` のディレクトリ名で、これは作業ディレクトリのパスを区切り文字ごと潰したもの。**客先の仕事をしている PC なら、そのパスに客先名が入っている。
+
+そこで `nenpi top --anonymize` はこの列を `proj-<8桁>` に置き換える。同じ名前は毎回同じ値になるので、実行をまたいで行を突き合わせられる。付けなかった場合は表の下に一行そう書く。これは**読み手から名前を隠す**もので、候補の名前を持っている相手が総当たりでハッシュを突き合わせるのは防げない。貼り付け事故に対する備えであって、匿名性の保証ではない。
 
 ## 実測と推定の線引き
 

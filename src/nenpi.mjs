@@ -10,7 +10,7 @@
  *   nenpi errors   [--days 30]   tool failures, split into environment-caused and model-caused
  *   nenpi hook pre|prompt|post   hook entry points (event JSON on stdin)
  *
- * Common options: --days N, --lang en|ja (or NENPI_LANG), --json.
+ * Common options: --days N, --lang en|ja (or NENPI_LANG), --json, --anonymize.
  *
  * The unit of counting is message.id, not the line: one API response is one charge.
  * Claude Code splits a single response into separate JSONL lines per thinking / text /
@@ -24,6 +24,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const HOME = os.homedir();
@@ -61,6 +62,18 @@ function lang() {
   return loc.startsWith('ja') ? 'ja' : 'en';
 }
 export const t = (en, ja) => (lang() === 'ja' ? ja : en);
+
+// The one column in this tool that carries a name rather than a number: `top` prints
+// the directory under ~/.claude/projects/, and that name is the working directory with
+// its separators flattened. On a machine that does client work, the client's name is
+// in it. `--anonymize` (or NENPI_ANONYMIZE) swaps it for a digest of itself, so the
+// rows stay stable and comparable across runs while the path stops being readable.
+// This hides a name from a reader; it does not withstand someone who already has a
+// list of candidate names and hashes them, so it is a guard against pasting, not a
+// guarantee of anonymity.
+export const anonymize = () => /^(1|true|yes|on)$/i.test(process.env.NENPI_ANONYMIZE || '');
+export const projectLabel = (name) =>
+  (anonymize() ? 'proj-' + createHash('sha256').update(String(name)).digest('hex').slice(0, 8) : name);
 
 // Every threshold below can be overridden from the environment, so the hooks can be
 // tuned per machine without editing this file. A non-numeric value falls back.
@@ -382,7 +395,13 @@ function top(days) {
   for (const s of a.sessions.sort((x, y) => y.read - x.read).slice(0, 20)) {
     console.log('  ' + M(s.read).padStart(8) + ' ' + String(s.turns).padStart(6)
       + ' ' + Math.round(s.ctxSum / s.turns).toLocaleString().padStart(10)
-      + ' ' + s.ctxMax.toLocaleString().padStart(11) + '  ' + s.project);
+      + ' ' + s.ctxMax.toLocaleString().padStart(11) + '  ' + projectLabel(s.project));
+  }
+  if (!anonymize()) {
+    console.log('');
+    console.log(t(
+      'The project column is your working directory. Use --anonymize before sharing this.',
+      'プロジェクト列は作業ディレクトリそのもの。外に出すなら --anonymize を付ける。'));
   }
 }
 
@@ -1645,6 +1664,7 @@ if (isMain) {
   })();
   const li = process.argv.indexOf('--lang');
   if (li > -1 && process.argv[li + 1]) process.env.NENPI_LANG = process.argv[li + 1];
+  if (process.argv.includes('--anonymize')) process.env.NENPI_ANONYMIZE = '1';
 
   if (cmd === 'hook' && sub === 'pre') hookPre();
   else if (cmd === 'hook' && sub === 'prompt') hookPrompt();
@@ -1673,6 +1693,7 @@ if (isMain) {
     console.log('  --days N   ' + t('window in days (default 30)', '対象とする日数（既定 30）'));
     console.log('  --lang     ' + t('en or ja (also NENPI_LANG)', 'en か ja（環境変数 NENPI_LANG も可）'));
     console.log('  --json     ' + t('machine-readable output (quality, errors)', '機械可読な出力（quality / errors）'));
+    console.log('  --anonymize ' + t('top: hash the project column (also NENPI_ANONYMIZE)', 'top: プロジェクト列をハッシュにする（環境変数 NENPI_ANONYMIZE も可）'));
     console.log('  --split T  ' + t('errors: compare before and after a timestamp', 'errors: ある時刻の前後で比べる'));
     process.exit(asked ? 0 : 1);
   }
