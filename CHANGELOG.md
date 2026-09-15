@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.1.5 — 2026-09-15
+
+The counting method moves to v3. A baseline saved by 0.1.4 or earlier is not compared
+against: `report` and `quality` say so and ask you to retake it with
+`nenpi baseline --days N`.
+
+### Fixed
+
+- **`--days` filters by the time of each line**, not by the file's modification time.
+  A session file touched today used to bring all of its older lines into the window,
+  so `--days 1` could report weeks of spend.
+- **Subagent transcripts are counted.** Claude Code writes them to
+  `<session>/subagents/*.jsonl`, which was never read, so a session that delegated most
+  of its work looked cheap. Their spend now counts toward the session that started
+  them; they are not counted as sessions of their own, do not add to the startup cost,
+  and the task handed to a subagent is not counted as a user prompt or correction. In
+  `top` they appear as separate rows marked "(subagent)".
+- **A split response whose first line has no `usage` is no longer dropped.** The
+  message id was marked as seen before `usage` was checked, so the later line that
+  carried it was skipped as a duplicate.
+- **A transcript line that is valid JSON but not an object (`null`) no longer crashes**
+  `report`, `quality`, `effect` or `errors`.
+- **`effect` recognises the hook commands the README shows.** Only a quoted
+  `nenpi.mjs"` path was matched, so `nenpi hook post`, `npx @hyuga/nenpi hook post` and an
+  unquoted path were never seen as nudges firing.
+- **Tool output is sized in UTF-8 bytes, as documented.** String length was used, which
+  put Japanese text at a third of its real size in `injected`, residency and hook
+  context tokens.
+- **A 0% intelligence metric in the baseline is compared, not skipped.** A tool failure
+  rate going from 0% to 100% used to read as "no baseline", so the verdict could say
+  "on target". It now reads as worse (change shown as "—"); 0% to 0% reads as unchanged.
+  A 0 in the fuel or speed row still means nothing was recorded.
+- **Hook keys no longer carry the hook's arguments.** A hook is named by its script and
+  subcommand (`redline hook pre`); anything after that, and any `VAR=value` prefix, is
+  dropped. Arguments could hold a token, and the key is written to `quality --json` and
+  to the saved quality baseline. A baseline saved by an earlier version keeps whatever
+  it recorded until you retake it.
+- **Transcripts are read line by line** instead of whole, so a file too large for one
+  string is no longer skipped, and `quality` no longer holds a whole session as parsed
+  objects. A file that cannot be read is still left out, but the command now says how
+  many on stderr instead of passing over them in silence.
+
+### Changed
+
+- **`errors --anonymize`** (also `NENPI_ANONYMIZE=1`) leaves out the section with the
+  first line of each error. That text is raw tool output and can quote a path, a URL or
+  a token. Without the flag the section stays and says so in one line. `errors --json`
+  never included it.
+- The session count in `report` now counts only sessions with activity inside the
+  window.
+
 ## 0.1.4 — 2026-09-12
 
 ### Added

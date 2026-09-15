@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   analyzeSession, mergeQuality, sessionRate, summaryJson,
   bandOf, bandLabel, BANDS, CORRECTION_WORDS, injectedText,
@@ -15,6 +17,7 @@ import {
   foldResponses,
   classifyError, tallyErrors, emptyErrors, errorsJson, ENV_ERROR_WORDS,
 } from '../src/nenpi.mjs';
+import * as nenpi from '../src/nenpi.mjs';
 
 // Most assertions below check the Japanese wording, so pin the output language.
 process.env.NENPI_LANG = 'ja';
@@ -325,12 +328,12 @@ test('attachment の hook_* から回数・時間・注入トークン・打切�
   assert.equal(r.ms, 200);
   assert.equal(r.timed, 2);
   assert.equal(r.injN, 1);            // 注入があったのは1回だけ
-  assert.equal(r.tok, Math.round(350 / 3.5));
+  assert.equal(r.tok, Math.round(1050 / 3.5));   // 「あ」は UTF-8 で 3 バイト
   assert.equal(a.att['auto-load-workflow'].cancel, 1);
   assert.equal(a.att['habit hook post'].err, 1);
   assert.equal(a.hookErrors, 1);
   assert.equal(a.hookCtxCount, 1);    // hook_additional_context は重複なので数えない
-  assert.equal(a.hookCtxTok, Math.round(350 / 3.5));
+  assert.equal(a.hookCtxTok, Math.round(1050 / 3.5));
   assert.deepEqual(a.attEvents, { PreToolUse: 1, Stop: 1, UserPromptSubmit: 1, PostToolUse: 1 });
 });
 
@@ -490,9 +493,10 @@ test('±5% 未満の差は揺れとして無視する', () => {
   assert.equal(verdict(base, big).rows[1].dir, 'worse');
 });
 
-test('基準側が 0 の指標は「基準なし」になる', () => {
+test('基準側が 0% の知能指標は、0% のままなら変化なし、上がれば悪化', () => {
   const base = mk({ quality: { correctionRate: 0 } });
-  assert.equal(verdict(base, mk()).rows[3].dir, 'nobase');
+  assert.equal(verdict(base, mk()).rows[3].dir, 'worse');
+  assert.equal(verdict(base, base).rows[3].dir, 'flat');
 });
 
 /* ── 機体（airframe）との接続 ──────────────────────── */
@@ -849,5 +853,172 @@ test('anonymize: 環境変数は真を表す値のときだけ効く', () => {
     }
   } finally {
     if (saved === undefined) delete process.env.NENPI_ANONYMIZE; else process.env.NENPI_ANONYMIZE = saved;
+  }
+});
+
+/* ── 集計の穴と出力の漏れ（0.1.5）──────────────────── */
+
+const CLI = fileURLToPath(new URL('../src/nenpi.mjs', import.meta.url));
+const NOW = new Date().toISOString();
+const OLD = new Date(Date.now() - 10 * 86400e3).toISOString();
+
+// ~/.claude/projects/ を一時フォルダに組み、そこを HOME にして CLI を走らせる。
+const fakeHome = (files) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nenpi-home-'));
+  for (const [rel, lines] of Object.entries(files)) {
+    const p = path.join(home, '.claude', 'projects', ...rel.split('/'));
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n');
+  }
+  return home;
+};
+const cli = (home, ...args) => spawnSync(process.execPath, [CLI, ...args], {
+  encoding: 'utf8',
+  env: { ...process.env, HOME: home, USERPROFILE: home, NENPI_STATE_DIR: path.join(home, 'state'),
+    NENPI_LANG: 'ja', NENPI_ANONYMIZE: '' },
+});
+const billed = (id, ts, read, extra = {}) => ({
+  type: 'assistant', requestId: 'req_' + id, timestamp: ts,
+  message: { id, content: [{ type: 'text', text: 'x' }],
+    usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: read, cache_creation_input_tokens: 0 } },
+  ...extra,
+});
+const READ_ROW = /cache_read\s+毎ターン文脈を読み直す\s+(\S+)/;
+const at = (ts) => (l) => ({ ...JSON.parse(l), timestamp: ts });
+
+test('--days はファイルの更新日時ではなく行の時刻で絞る', () => {
+  const home = fakeHome({ 'p/s1.jsonl': [billed('m1', OLD, 9e6), billed('m2', NOW, 1e6)] });
+  const q = cli(home, 'quality', '--json', '--days', '1');
+  assert.equal(q.status, 0, q.stderr);
+  assert.equal(fuel(JSON.parse(q.stdout)).read, 1e6);
+  assert.equal(READ_ROW.exec(cli(home, 'report', '--days', '1').stdout)?.[1], '1.0M');
+
+  const errHome = fakeHome({ 'p/s1.jsonl': [
+    at(OLD)(useLine('a', 'Bash', 'claude-opus-5', 'high')), resLine('a', 'x', true, OLD),
+    at(NOW)(useLine('b', 'Bash', 'claude-opus-5', 'high')), resLine('b', 'x', true, NOW),
+  ] });
+  assert.equal(JSON.parse(cli(errHome, 'errors', '--json', '--days', '1').stdout).toolResults, 1);
+
+  const { turns } = foldResponses([line('r1', OLD, [use]), line('r2', NOW, [use])], { since: Date.now() - 86400e3 });
+  assert.equal(turns.length, 1);
+});
+
+test('サブエージェントの記録（<session>/subagents/*.jsonl）も消費に数え、別セッションには数えない', () => {
+  const home = fakeHome({
+    'p/s1.jsonl': [billed('m1', NOW, 1e6)],
+    'p/s1/subagents/agent-a1.jsonl': [billed('m2', NOW, 9e6, { isSidechain: true })],
+  });
+  const q = cli(home, 'quality', '--json', '--days', '1');
+  assert.equal(q.status, 0, q.stderr);
+  const j = JSON.parse(q.stdout);
+  assert.equal(fuel(j).read, 1e7);
+  assert.equal(j.sessions, 1);
+  const r = cli(home, 'report', '--days', '1').stdout;
+  assert.equal(READ_ROW.exec(r)?.[1], '10M');
+  assert.match(r, / 1セッション /);
+});
+
+test('サブエージェントへの指示文は人の発言にも訂正にも数えない', () => {
+  const a = analyzeSession([
+    { type: 'user', isSidechain: true, message: { content: '違う。そうじゃない、やり直して' } },
+    asst('m1', 1000, [{ type: 'text', text: 'x' }], { isSidechain: true }),
+  ]);
+  assert.equal(a.userPrompts, 0);
+  assert.equal(a.corrections, 0);
+});
+
+test('usage の無い分割行が先に来ても、同じ message.id の後続行の usage を数える', () => {
+  const noUsage = { type: 'assistant', requestId: 'req_m1', timestamp: NOW,
+    message: { id: 'm1', content: [{ type: 'thinking', thinking: '...' }] } };
+  assert.equal(analyzeSession([noUsage, asst('m1', 1000, [{ type: 'text', text: 'x' }])]).turns, 1);
+  const home = fakeHome({ 'p/s1.jsonl': [noUsage, billed('m1', NOW, 1e6)] });
+  assert.equal(READ_ROW.exec(cli(home, 'report', '--days', '1').stdout)?.[1], '1.0M');
+});
+
+test('null の行が混ざっても落ちない', () => {
+  assert.equal(analyzeSession([null, 5, asst('m1', 1000, [{ type: 'text', text: 'x' }])]).turns, 1);
+  assert.equal(foldResponses(['null', line('r1', NOW, [use])]).turns.length, 1);
+  assert.equal(tallyErrors(['null', resLine('a', 'x', true)], emptyErrors()).results, 1);
+  const home = fakeHome({ 'p/s1.jsonl': ['null', billed('m1', NOW, 1e6)] });
+  for (const cmd of ['report', 'quality', 'effect', 'errors']) {
+    const r = cli(home, cmd, '--days', '1');
+    assert.equal(r.status, 0, cmd + ': ' + r.stderr);
+  }
+});
+
+test('README の書き方（nenpi hook post・引用符なし・npx）でも nenpi のフックを拾う', () => {
+  const att = (cmd, i) => JSON.stringify({ type: 'attachment', timestamp: '2026-09-01T00:00:0' + i + 'Z',
+    attachment: { type: 'hook_success', command: cmd, stdout: '[nenpi] x' } });
+  const { fires } = foldResponses([
+    att('nenpi hook post', 0),
+    att('node C:/tools/nenpi/src/nenpi.mjs hook pre', 1),
+    att('npx @hyuga/nenpi hook prompt', 2),
+    att('npx -y @hyuga/nenpi@0.1.5 hook post', 3),
+    att('node "C:\\x\\nenpi.mjs" hook post', 4),
+    att('node C:/x/notnenpi.mjs hook pre', 5),
+    att('mynenpi hook post', 6),
+  ]);
+  assert.deepEqual(fires.map((f) => f.kind), ['post', 'pre', 'prompt', 'post', 'post']);
+});
+
+test('投入トークンは文字数ではなく UTF-8 のバイト数から見積もる', () => {
+  assert.equal(nenpi.blockSize('あ'.repeat(350)).tok, Math.round(1050 / 3.5));
+  assert.equal(nenpi.blockSize([{ type: 'text', text: 'あ'.repeat(350) }]).tok, Math.round(1050 / 3.5));
+  assert.equal(nenpi.blockSize('a'.repeat(350)).tok, 100);
+});
+
+test('基準が 0% の知能指標が悪化したら、燃費が下がっていても「狙いどおり」と言わない', () => {
+  const base = mk({ quality: { toolErrorRate: 0 } });
+  const v = verdict(base, mk({ days_: { d1: { cacheRead: 500, turns: 10 } }, quality: { toolErrorRate: 100 } }));
+  assert.equal(v.rows[1].dir, 'worse');
+  assert.equal(v.sayCode, 'tradeoff');
+  // 実時間 0 は「記録が無かった」なので、比べる相手にならない
+  assert.equal(verdict(mk({ speed: { turnMedianMs: 0 } }), mk()).rows[6].dir, 'nobase');
+});
+
+test('フックの集計キーにスクリプト以降の引数（秘密が入り得る）を残さない', () => {
+  const planted = 'PLANTED0123456789';   // 引数に入った値の目印（実在しない合成値）
+  const a = analyzeSession([
+    asst('m1', 1000, [{ type: 'text', text: 'x' }]),
+    hookAtt({ type: 'hook_success', hookEvent: 'PreToolUse', durationMs: 1,
+      command: 'node "C:/x/deploy.mjs" hook pre --opt ' + planted, stdout: '' }),
+    hookAtt({ type: 'hook_success', hookEvent: 'Stop', durationMs: 1,
+      command: 'FOO=' + planted + ' mytool --opt=' + planted, stdout: '' }),
+    { type: 'system', hookInfos: [{ command: 'node "C:/x/gate.mjs" ' + planted, durationMs: 3 }] },
+  ]);
+  assert.deepEqual(Object.keys(a.att).sort(), ['deploy hook pre', 'mytool']);
+  assert.deepEqual(Object.keys(a.hooks), ['gate']);
+  assert.ok(!JSON.stringify(summaryJson(mergeQuality([a]), 1)).includes(planted));
+});
+
+test('errors --anonymize はエラー本文を出さない。付けないときは本文が生だと言う', () => {
+  const planted = 'PLANTED0123456789';   // エラー本文に入った値の目印（実在しない合成値）
+  const home = fakeHome({ 'p/s1.jsonl': [
+    at(NOW)(useLine('a', 'Bash', 'claude-opus-5', 'high')),
+    resLine('a', 'curl: (22) 401 ' + planted, true, NOW),
+  ] });
+  const plain = cli(home, 'errors', '--days', '1');
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.match(plain.stdout, /--anonymize/);
+  const anon = cli(home, 'errors', '--days', '1', '--anonymize');
+  assert.equal(anon.status, 0, anon.stderr);
+  assert.ok(!anon.stdout.includes(planted), anon.stdout);
+});
+
+test('readLines はバッファの境界で行も多バイト文字も割らない', () => {
+  const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nenpi-lines-')), 'x.jsonl');
+  fs.writeFileSync(p, 'あいう\n{"a":1}\r\n\nlast');
+  for (const chunk of [1, 2, 5, 1 << 20]) {
+    assert.deepEqual([...nenpi.readLines(p, chunk)], ['あいう', '{"a":1}\r', '', 'last'], 'chunk ' + chunk);
+  }
+});
+
+test('読めなかった記録ファイルは黙って捨てず、件数を stderr に出す', () => {
+  const home = fakeHome({ 'p/s1.jsonl': [billed('m1', NOW, 1e6)] });
+  fs.mkdirSync(path.join(home, '.claude', 'projects', 'p', 'broken.jsonl'));
+  for (const args of [['report'], ['quality', '--json']]) {
+    const r = cli(home, ...args, '--days', '1');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /読めなかった記録 1 件/, args.join(' '));
   }
 });

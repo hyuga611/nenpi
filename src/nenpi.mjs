@@ -86,34 +86,77 @@ const tok = (b) => Math.round(b / BYTES_PER_TOK);
 const M = (n) => (n / 1e6).toFixed(n < 1e7 ? 1 : 0) + 'M';
 const pct = (a, b) => (100 * a / (b || 1)).toFixed(1) + '%';
 
+const cutoffOf = (days) => Date.now() - days * 86400e3;
+// A line with no readable timestamp is kept, as it was before lines were filtered.
+const before = (o, cutoff) => Date.parse(o.timestamp) < cutoff;
+
+// A subagent's transcript lives in <session>/subagents/, not beside its parent. Its
+// spend is real spend, but it is part of the parent session, so it is flagged `sub`
+// and never counted as a session of its own.
 function sessionFiles(days) {
-  const cutoff = Date.now() - days * 86400e3;
+  const cutoff = cutoffOf(days);
   const out = [];
   let dirs = [];
   try { dirs = fs.readdirSync(PROJECTS); } catch { return out; }
+  const add = (p, project, sub) => {
+    let s; try { s = fs.statSync(p); } catch { return; }
+    if (s.mtimeMs >= cutoff) out.push({ path: p, project, mtime: s.mtimeMs, sub });
+  };
   for (const d of dirs) {
     const dir = path.join(PROJECTS, d);
     let st; try { st = fs.statSync(dir); } catch { continue; }
     if (!st.isDirectory()) continue;
     for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith('.jsonl')) continue;
-      const p = path.join(dir, f);
-      let s; try { s = fs.statSync(p); } catch { continue; }
-      if (s.mtimeMs < cutoff) continue;
-      out.push({ path: p, project: d, mtime: s.mtimeMs });
+      if (f.endsWith('.jsonl')) { add(path.join(dir, f), d, false); continue; }
+      let subs = [];
+      try { subs = fs.readdirSync(path.join(dir, f, 'subagents')); } catch { continue; }
+      for (const g of subs) if (g.endsWith('.jsonl')) add(path.join(dir, f, 'subagents', g), d, true);
     }
   }
   return out.sort((a, b) => b.mtime - a.mtime);
 }
 
-function blockSize(content) {
+// Transcripts that could not be read. They are left out of every total, so the
+// CLI says how many on exit instead of passing over them in silence.
+const unreadable = new Map();
+
+// Line by line without holding the file: a transcript can outgrow the longest
+// string V8 allows, and readFileSync then throws. Splitting on the 0x0A byte
+// never cuts a UTF-8 character, since no multibyte sequence contains that byte.
+export function* readLines(file, chunk = 1 << 20) {
+  let fd;
+  try { fd = fs.openSync(file, 'r'); } catch (e) { unreadable.set(file, e.code); return; }
+  try {
+    const buf = Buffer.alloc(chunk);
+    let carry = [];
+    for (;;) {
+      let n;
+      try { n = fs.readSync(fd, buf, 0, chunk, null); } catch (e) { unreadable.set(file, e.code); return; }
+      if (n === 0) break;
+      let start = 0;
+      for (let i = buf.indexOf(10); i !== -1 && i < n; i = buf.indexOf(10, start)) {
+        yield carry.length ? Buffer.concat([...carry, buf.subarray(start, i)]).toString('utf8')
+          : buf.toString('utf8', start, i);
+        carry = [];
+        start = i + 1;
+      }
+      if (start < n) carry.push(Buffer.from(buf.subarray(start, n)));
+    }
+    if (carry.length) yield Buffer.concat(carry).toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Tool output is measured in UTF-8 bytes; Japanese text is three bytes a character.
+export function blockSize(content) {
   let t = 0, imgs = 0;
-  if (typeof content === 'string') return { tok: tok(content.length), imgs: 0 };
+  if (typeof content === 'string') return { tok: tok(Buffer.byteLength(content)), imgs: 0 };
   if (Array.isArray(content)) {
     for (const b of content) {
       if (b.type === 'image') { imgs++; t += IMG_TOK; }
-      else if (b.type === 'text') t += tok((b.text || '').length);
-      else t += tok(JSON.stringify(b).length);
+      else if (b.type === 'text') t += tok(Buffer.byteLength(b.text || ''));
+      else t += tok(Buffer.byteLength(JSON.stringify(b)));
     }
   }
   return { tok: t, imgs };
@@ -126,21 +169,22 @@ function scan(days) {
     toolUsesTotal: 0, toolTurns: 0, parallelTurns: 0,
     ctx: [], baselines: [], residTotal: 0, files: 0,
   };
-  for (const { path: p, project } of sessionFiles(days)) {
-    let lines;
-    try { lines = fs.readFileSync(p, 'utf8').split('\n'); } catch { continue; }
-    acc.files++;
+  const cutoff = cutoffOf(days);
+  for (const { path: p, project, sub } of sessionFiles(days)) {
     const id2name = {}, events = [];
     // The billing unit is one API response = one message.id, not one line.
     const seenMsg = new Set();   // keeps the same usage from being counted twice
     const toolByReq = {};        // requestId -> how many tools that response called
     let lineNo = 0;
-    const s = { project, file: p, turns: 0, read: 0, write: 0, out: 0, ctxSum: 0, ctxMax: 0 };
+    const s = { project, file: p, sub, turns: 0, read: 0, write: 0, out: 0, ctxSum: 0, ctxMax: 0 };
     let first = true;
-    for (const ln of lines) {
+    for (const ln of readLines(p)) {
       if (!ln.trim()) continue;
       let o; try { o = JSON.parse(ln); } catch { continue; }
+      if (!o || typeof o !== 'object') continue;
       const content = o.message?.content;
+      // A file touched inside the window can still hold weeks of older lines.
+      const old = before(o, cutoff);
       lineNo++;
       if (o.type === 'assistant') {
         // Claude Code splits one API response into a separate line per
@@ -148,20 +192,24 @@ function scan(days) {
         // the same message.id and the same usage. Summing per line counts the
         // same charge several times over (+82% here, measured).
         const mid = o.message?.id || o.requestId || null;
-        const dup = mid !== null && seenMsg.has(mid);
-        if (mid !== null) seenMsg.add(mid);
         const u = o.message?.usage;
-        if (u && !dup) {
-          s.turns++; acc.turns++;
-          const cr = u.cache_read_input_tokens || 0;
-          const cc = u.cache_creation_input_tokens || 0;
-          const ip = u.input_tokens || 0;
-          s.read += cr; s.write += cc; s.out += u.output_tokens || 0;
-          acc.usage.read += cr; acc.usage.write += cc;
-          acc.usage.in += ip; acc.usage.out += u.output_tokens || 0;
-          const ctx = cr + cc + ip;
-          acc.ctx.push(ctx); s.ctxSum += ctx; if (ctx > s.ctxMax) s.ctxMax = ctx;
-          if (first) { acc.baselines.push(cc + ip); first = false; }
+        // Only a line that carries usage uses up its message.id; a split line
+        // without it must not hide the one that has it.
+        if (u && !(mid !== null && seenMsg.has(mid))) {
+          if (mid !== null) seenMsg.add(mid);
+          if (!old) {
+            s.turns++; acc.turns++;
+            const cr = u.cache_read_input_tokens || 0;
+            const cc = u.cache_creation_input_tokens || 0;
+            const ip = u.input_tokens || 0;
+            s.read += cr; s.write += cc; s.out += u.output_tokens || 0;
+            acc.usage.read += cr; acc.usage.write += cc;
+            acc.usage.in += ip; acc.usage.out += u.output_tokens || 0;
+            const ctx = cr + cc + ip;
+            acc.ctx.push(ctx); s.ctxSum += ctx; if (ctx > s.ctxMax) s.ctxMax = ctx;
+            if (first && !sub) acc.baselines.push(cc + ip);
+          }
+          first = false;
         }
         if (Array.isArray(content)) {
           // Whether a response bundled its tool calls cannot be told from a
@@ -170,10 +218,10 @@ function scan(days) {
           const rid = o.requestId || mid || ('line#' + lineNo);
           let n = 0;
           for (const b of content) if (b.type === 'tool_use') { id2name[b.id] = b.name; n++; }
-          if (n > 0) { toolByReq[rid] = (toolByReq[rid] || 0) + n; acc.toolUsesTotal += n; }
+          if (n > 0 && !old) { toolByReq[rid] = (toolByReq[rid] || 0) + n; acc.toolUsesTotal += n; }
         }
       }
-      if (o.type === 'user' && Array.isArray(content)) {
+      if (o.type === 'user' && Array.isArray(content) && !old) {
         for (const b of content) {
           if (b.type !== 'tool_result') continue;
           const name = id2name[b.tool_use_id] || 'unknown';
@@ -187,6 +235,7 @@ function scan(days) {
     }
     for (const n of Object.values(toolByReq)) { acc.toolTurns++; if (n > 1) acc.parallelTurns++; }
     if (!s.turns) continue;
+    if (!sub) acc.files++;
     for (const [name, t, at] of events) {
       const r = t * Math.max(0, s.turns - at);
       acc.resid[name] = (acc.resid[name] || 0) + r;
@@ -201,8 +250,9 @@ function scan(days) {
 const BASELINE = path.join(STATE_DIR, 'nenpi-baseline.json');
 // Version of the counting method. 1 = the per-line era (double counting, and
 // bundling could not be detected). 2 = deduplicate by message.id and detect
-// bundling by requestId. A baseline from a different version is not comparable.
-const CALC = 2;
+// bundling by requestId. 3 = filter --days by line time, count subagent transcripts,
+// size tool output in bytes. A baseline from a different version is not comparable.
+const CALC = 3;
 
 // Of everything the report prints, these are the few worth tracking week to week.
 function indicators(a) {
@@ -255,9 +305,9 @@ function printDiff(now, nowDays) {
   if ((prev.calc || 1) !== CALC) {
     console.log('## ' + t('Baseline comparison — not possible', '基準との比較 — できない'));
     console.log('  ' + t('The baseline (' + prev.savedAt.slice(0, 10) + ') was computed with v' + (prev.calc || 1)
-      + ', this run uses v' + CALC + '. Per-line double counting was fixed, so the numbers are not continuous.',
+      + ', this run uses v' + CALC + '. The counting changed, so the numbers are not continuous.',
       '基準（' + prev.savedAt.slice(0, 10) + '）は計算方式 v' + (prev.calc || 1)
-      + '、今は v' + CALC + '。行単位の二重計上を直したので数字が地続きでない。'));
+      + '、今は v' + CALC + '。数え方が変わったので数字が地続きでない。'));
     console.log('  ' + t('Retake it with `nenpi baseline --days ' + prev.days + '`.',
       '`nenpi baseline --days ' + prev.days + '` で取り直すこと。'));
     console.log('');
@@ -395,7 +445,8 @@ function top(days) {
   for (const s of a.sessions.sort((x, y) => y.read - x.read).slice(0, 20)) {
     console.log('  ' + M(s.read).padStart(8) + ' ' + String(s.turns).padStart(6)
       + ' ' + Math.round(s.ctxSum / s.turns).toLocaleString().padStart(10)
-      + ' ' + s.ctxMax.toLocaleString().padStart(11) + '  ' + projectLabel(s.project));
+      + ' ' + s.ctxMax.toLocaleString().padStart(11) + '  ' + projectLabel(s.project)
+      + (s.sub ? t(' (subagent)', '（サブエージェント）') : ''));
   }
   if (!anonymize()) {
     console.log('');
@@ -426,7 +477,6 @@ export function sparMode(cwd) {
 
 export const muted = (cwd) => sparMode(cwd) === 'cruise';
 
-const NL_CH = String.fromCharCode(10);
 const IMG_RE = /\.(png|jpe?g|gif|webp|bmp|pdf)$/i;
 const BIG_FILE = envInt('NENPI_BIG_FILE', 60 * 1024); // a full-file Read above this size gets its window cut
 const READ_LIMIT = envInt('NENPI_READ_LIMIT', 400);
@@ -491,11 +541,19 @@ const MENTION_CAP = 20000;    // chars scanned per file when deciding a Read was
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
 const baseName = (p) => String(p || '').replace(/\\/g, '/').split('/').pop();
 const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// The key names the hook and its subcommand ("redline hook pre"), never its
+// arguments or VAR=value prefixes: those can hold tokens, and the key is written
+// to --json and to the saved baseline.
 const shortHook = (cmd) => {
   const c = String(cmd);
   const m = [...c.matchAll(/([\w.-]+)\.(mjs|cjs|js|ps1|sh|py)/g)].pop();
-  if (!m) return c.split(/\s+/)[0];
-  return (m[1] + ' ' + c.slice(m.index + m[0].length).replace(/^"?\s*/, '')).trim();
+  if (!m) return c.split(/\s+/).find((w) => w && !/^\w+=/.test(w)) || '?';
+  const words = [m[1]];
+  for (const w of c.slice(m.index + m[0].length).replace(/^["']/, '').trim().split(/\s+/)) {
+    if (words.length > 3 || !/^[a-z][a-z-]{0,23}$/.test(w)) break;
+    words.push(w);
+  }
+  return words.join(' ');
 };
 
 // Text a hook injected survives inside tool_result as "[name] ...".
@@ -563,15 +621,15 @@ export function analyzeSession(records) {
 
   let seq = 0;
   for (const o of records) {
+    if (!o || typeof o !== 'object') continue;
     seq++;
     const content = o.message?.content;
 
     if (o.type === 'assistant') {
       const mid = o.message?.id || o.requestId || null;
-      const dup = mid !== null && seenMsg.has(mid);
-      if (mid !== null) seenMsg.add(mid);
       const u = o.message?.usage;
-      if (u && !dup) {
+      if (u && !(mid !== null && seenMsg.has(mid))) {
+        if (mid !== null) seenMsg.add(mid);
         s.turns++;
         const cr = u.cache_read_input_tokens || 0, cc = u.cache_creation_input_tokens || 0;
         const ip = u.input_tokens || 0, op = u.output_tokens || 0;
@@ -613,7 +671,8 @@ export function analyzeSession(records) {
           s.toolResults++; trTurns.push(s.turns);
           if (b.is_error) { s.toolErrors++; errTurns.push(s.turns); }
         }
-      } else if (!o.isMeta && !o.isCompactSummary) {
+      } else if (!o.isMeta && !o.isCompactSummary && !o.isSidechain) {
+        // A sidechain "user" line is the task handed to a subagent, not a person.
         const txt = typeof content === 'string' ? content
           : Array.isArray(content) ? content.filter((b) => b.type === 'text').map((b) => b.text || '').join('\n') : '';
         if (txt.trim()) {
@@ -659,7 +718,7 @@ export function analyzeSession(records) {
       if (at.type === 'hook_non_blocking_error') { e.err++; s.hookErrors++; }
       if (at.type === 'hook_success') {
         const t = injectedText(at.stdout);
-        if (t) { e.injN++; e.tok += tok(t.length); s.hookCtxCount++; s.hookCtxTok += tok(t.length); }
+        if (t) { const n = tok(Buffer.byteLength(t)); e.injN++; e.tok += n; s.hookCtxCount++; s.hookCtxTok += n; }
       }
       continue;
     }
@@ -757,7 +816,7 @@ export function mergeQuality(list) {
     'hookCtxTok', 'hookCtxCount', 'hookErrors'];
   for (const s of list) {
     if (!s.turns) continue;
-    a.sessions++;
+    if (!s.sub) a.sessions++;
     for (const k of SUM) a[k] += s[k];
     if (s.hasTurnDuration) a.turnDurationSessions++;
     for (const c of s.ctxByTurn) a.ctx.push(c);
@@ -824,17 +883,20 @@ const qrate = (n, d) => (d ? (100 * n / d).toFixed(1) + '%' : '—');
 const secs = (ms) => (ms / 1000).toFixed(1) + 's';
 const dollars = (v) => '$' + v.toFixed(2);
 
+// One record at a time, so a session is never held in memory as parsed objects.
+function* sessionRecords(file, cutoff) {
+  for (const ln of readLines(file)) {
+    if (!ln.trim()) continue;
+    let o; try { o = JSON.parse(ln); } catch { continue; }   // 壊れた行は捨てる
+    if (o && typeof o === 'object' && !before(o, cutoff)) yield o;
+  }
+}
+
 function scanQuality(days) {
   const out = [];
-  for (const { path: p } of sessionFiles(days)) {
-    let lines;
-    try { lines = fs.readFileSync(p, 'utf8').split('\n'); } catch { continue; }
-    const recs = [];
-    for (const ln of lines) {
-      if (!ln.trim()) continue;
-      try { recs.push(JSON.parse(ln)); } catch { /* 壊れた行は捨てる */ }
-    }
-    out.push(analyzeSession(recs));
+  const cutoff = cutoffOf(days);
+  for (const { path: p, sub } of sessionFiles(days)) {
+    out.push(Object.assign(analyzeSession(sessionRecords(p, cutoff)), { sub }));
   }
   return mergeQuality(out);
 }
@@ -878,6 +940,9 @@ export function verdict(base, now) {
     let b = 0, v = 0;
     try { b = get(base); } catch { b = 0; }
     try { v = get(now); } catch { v = 0; }
+    // A failure rate of 0% is a real measurement, and climbing from it is the worst
+    // change there is. For fuel and speed a 0 only means nothing was recorded.
+    if (!b && group === 'intel') return { group, label, b, v, d: v ? Infinity : 0, dir: v ? 'worse' : 'flat', unit };
     const d = b ? 100 * (v - b) / b : 0;
     const dir = !b ? 'nobase' : Math.abs(d) < NOISE ? 'flat' : (d < 0 ? 'better' : 'worse');
     return { group, label, b, v, d, dir, unit };
@@ -931,6 +996,14 @@ function printVerdict(now, days) {
     console.log('');
     return;
   }
+  if ((base.calc || 1) !== CALC) {
+    console.log('## ' + t('Verdict — not possible', '判定 — できない'));
+    console.log('  ' + t('The baseline was computed with v' + (base.calc || 1) + ', this run uses v' + CALC
+      + '. Retake it with `nenpi baseline --days ' + base.days + '`.',
+      '基準は計算方式 v' + (base.calc || 1) + '、今は v' + CALC + '。`nenpi baseline --days ' + base.days + '` で取り直すこと。'));
+    console.log('');
+    return;
+  }
   const v = verdict(base, now);
   console.log('## ' + t('Verdict', '判定')
     + t(' (baseline: ' + String(base.savedAt || '?').slice(0, 10) + ', last ' + base.days + ' days)',
@@ -941,7 +1014,7 @@ function printVerdict(now, days) {
   for (const r of v.rows) {
     console.log('  ' + padR(t(...GROUP_LABEL[r.group]), 7) + padR(t(...r.label), 28)
       + padL(vnum(r.b, r.unit), 12) + '  →' + padL(vnum(r.v, r.unit), 12)
-      + padL((r.d > 0 ? '+' : '') + r.d.toFixed(0) + '%', 8) + '  ' + t(...DIR_LABEL[r.dir]));
+      + padL(Number.isFinite(r.d) ? (r.d > 0 ? '+' : '') + r.d.toFixed(0) + '%' : '—', 8) + '  ' + t(...DIR_LABEL[r.dir]));
   }
   console.log('  → ' + v.say);
   console.log('');
@@ -956,19 +1029,23 @@ function printVerdict(now, days) {
    Each firing survives in the transcript as type:"attachment" / hook_success,
    with the command (which nudge), the stdout (what it said) and a timestamp. */
 
-const NENPI_HOOK = /nenpi\.mjs\\?" hook (pre|prompt|post)/;
+// Every way the README lets you register it: `nenpi hook post`, `npx @hyuga/nenpi hook post`,
+// and `node <path>/nenpi.mjs hook post` with or without quotes.
+const NENPI_HOOK = /(?:^|[\s"'/\\])nenpi(?:\.mjs|@[\w.-]+)?\\?["']?\s+hook\s+(pre|prompt|post)\b/;
 
 // One response is split across lines by thinking / text / tool_use, all sharing a
 // message.id. Counting lines pins the bundling rate at 0.0% forever, so regroup by
 // requestId first. Each response becomes { t, tools, names, ids, seg }, where seg
 // numbers the stretch between two human prompts.
-export function foldResponses(lines) {
+// opts.since (ms) drops lines older than that.
+export function foldResponses(lines, opts = {}) {
   const byReq = new Map();
   const fires = [];
   let seg = 0;
   for (const line of lines) {
     if (!line) continue;
     let o; try { o = JSON.parse(line); } catch { continue; }
+    if (!o || typeof o !== 'object' || (opts.since && before(o, opts.since))) continue;
     if (o.type === 'user') {
       // A user line carrying only tool_result is a tool coming back; anything else
       // is a person speaking, and starts a new stretch (meta lines included).
@@ -1006,12 +1083,12 @@ export function scanEffect(days) {
     prompt: { fired: 0, turnsLeft: [] },
     sessions: 0,
   };
+  const since = cutoffOf(days);
   for (const f of sessionFiles(days)) {
-    let lines; try { lines = fs.readFileSync(f.path, 'utf8').split(NL_CH); } catch { continue; }
     // Lay this session's responses out in order, deduplicated by message.id.
-    const { turns, fires } = foldResponses(lines);
+    const { turns, fires } = foldResponses(readLines(f.path), { since });
     if (!fires.length) continue;
-    r.sessions++;
+    if (!f.sub) r.sessions++;
 
     // Mark the turns right after a nudge, and keep them out of the baseline set.
     const marked = new Set();
@@ -1077,7 +1154,7 @@ export function tallyErrors(lines, acc, opts = {}) {
   for (const line of lines) {
     if (!line) continue;
     let o; try { o = JSON.parse(line); } catch { continue; }
-    const c = o.message?.content;
+    const c = o?.message?.content;
     if (!Array.isArray(c)) continue;
     if (o.type === 'assistant') {
       const model = String(o.message?.model || '?').replace(/^claude-/, '');
@@ -1108,10 +1185,10 @@ export function tallyErrors(lines, acc, opts = {}) {
 
 export function scanErrors(days, opts = {}) {
   const acc = emptyErrors();
+  const since = Math.max(opts.since || 0, cutoffOf(days));
   for (const f of sessionFiles(days)) {
-    let lines; try { lines = fs.readFileSync(f.path, 'utf8').split(NL_CH); } catch { continue; }
-    acc.sessions++;
-    tallyErrors(lines, acc, opts);
+    if (!f.sub) acc.sessions++;
+    tallyErrors(readLines(f.path), acc, { ...opts, since });
   }
   return acc;
 }
@@ -1167,10 +1244,15 @@ function errors(days, asJson, splitArg) {
     .forEach(([k, v]) => { console.log('  ' + k.padEnd(40) + String(v.e).padStart(5) + ' /' + String(v.n).padStart(6) + r(v.e, v.n).padStart(8)
       + t('   env ', '   環境 ') + v.env + t(' / model ', ' / モデル ') + (v.e - v.env)); });
   console.log('');
-  console.log('## ' + t('First line of each error (stays on this machine; --json never includes it)',
-    'エラー文の先頭（このPCだけで見る。収集役には送らない）'));
-  Object.entries(a.texts).sort((x, y) => y[1] - x[1]).slice(0, 12)
-    .forEach(([k, v]) => { console.log('  ' + String(v).padStart(4) + '  ' + k); });
+  // Error text is raw tool output and can quote a path, a URL or a token.
+  if (!anonymize()) {
+    console.log('## ' + t('First line of each error (stays on this machine; --json never includes it)',
+      'エラー文の先頭（このPCだけで見る。収集役には送らない）'));
+    console.log('  ' + t('This is raw tool output and can contain paths or tokens. Use --anonymize before sharing this.',
+      'ツールの出力そのままで、パスや認証情報が混ざり得る。外に出すなら --anonymize を付ける。'));
+    Object.entries(a.texts).sort((x, y) => y[1] - x[1]).slice(0, 12)
+      .forEach(([k, v]) => { console.log('  ' + String(v).padStart(4) + '  ' + k); });
+  }
   const envShare = a.errors ? 100 * a.env / a.errors : 0;
   console.log('');
   if (envShare >= 30) console.log('→ ' + t(
@@ -1665,6 +1747,13 @@ if (isMain) {
   const li = process.argv.indexOf('--lang');
   if (li > -1 && process.argv[li + 1]) process.env.NENPI_LANG = process.argv[li + 1];
   if (process.argv.includes('--anonymize')) process.env.NENPI_ANONYMIZE = '1';
+  process.on('exit', () => {
+    if (!unreadable.size) return;
+    const [file, code] = unreadable.entries().next().value;
+    const eg = anonymize() ? code : file + ' ' + code;
+    console.error(t('nenpi: ' + unreadable.size + ' transcript file(s) could not be read and are not counted (e.g. ' + eg + ')',
+      'nenpi: 読めなかった記録 ' + unreadable.size + ' 件は数えていない（例: ' + eg + '）'));
+  });
 
   if (cmd === 'hook' && sub === 'pre') hookPre();
   else if (cmd === 'hook' && sub === 'prompt') hookPrompt();
@@ -1693,7 +1782,8 @@ if (isMain) {
     console.log('  --days N   ' + t('window in days (default 30)', '対象とする日数（既定 30）'));
     console.log('  --lang     ' + t('en or ja (also NENPI_LANG)', 'en か ja（環境変数 NENPI_LANG も可）'));
     console.log('  --json     ' + t('machine-readable output (quality, errors)', '機械可読な出力（quality / errors）'));
-    console.log('  --anonymize ' + t('top: hash the project column (also NENPI_ANONYMIZE)', 'top: プロジェクト列をハッシュにする（環境変数 NENPI_ANONYMIZE も可）'));
+    console.log('  --anonymize ' + t('top: hash the project column; errors: leave out the error text (also NENPI_ANONYMIZE)',
+      'top: プロジェクト列をハッシュにする / errors: エラー文を出さない（環境変数 NENPI_ANONYMIZE も可）'));
     console.log('  --split T  ' + t('errors: compare before and after a timestamp', 'errors: ある時刻の前後で比べる'));
     process.exit(asked ? 0 : 1);
   }

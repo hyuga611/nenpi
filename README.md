@@ -133,7 +133,7 @@ nenpi hook pre|prompt|post   hook entry points (event JSON on stdin)
 --lang      en or ja (also NENPI_LANG; defaults to your locale, else English)
 --json      machine-readable output (quality, errors)
 --split T   errors: compare before and after a timestamp
---anonymize top: replace the project column with a digest (also NENPI_ANONYMIZE)
+--anonymize top: replace the project column with a digest; errors: leave out the error text (also NENPI_ANONYMIZE)
 ```
 
 `nenpi baseline` freezes the current numbers so the next `report` and `quality` show a diff. It overwrites the previous baseline, so take one deliberately — after a change you want to measure from, not on every run.
@@ -154,25 +154,25 @@ All state lives in `~/.claude/nenpi/` (`NENPI_STATE_DIR` to move it). If you hav
 | `NENPI_BUNDLE_COOLDOWN` | `20` | Tool calls of silence after it speaks. |
 | `NENPI_BUNDLE_MAX` | `8` | Cap per session — if 8 times did not help, stop saying it. |
 | `NENPI_LANG` | locale | `en` or `ja`. |
-| `NENPI_ANONYMIZE` | unset | `1` to hash the project column in `top`. |
+| `NENPI_ANONYMIZE` | unset | `1` to hash the project column in `top` and leave the error text out of `errors`. |
 
 ## What leaves your machine, and what the output contains
 
 Nothing leaves. There is no `fetch`, no `node:http`, no `child_process` anywhere in the source, and no dependencies through which one could arrive later. It reads the JSONL transcripts under `~/.claude/projects/` and writes only to `~/.claude/nenpi/` (a saved baseline and the nudges' cooldown counters).
 
-The part worth knowing is about the output rather than the tool. `report`, `quality`, `effect` and `errors` print tool names and numbers — nothing that identifies a project. **`top` prints one column that is a name: the directory under `~/.claude/projects/`, which is your working directory with its separators flattened.** On a machine that does client work, the client's name is in that path, so it is in that column.
+The part worth knowing is about the output rather than the tool. `report`, `quality` and `effect` print tool and hook names and numbers — nothing that identifies a project. A hook is named by its script and subcommand (`redline hook pre`); its arguments are dropped, so a token passed on the command line never reaches `--json` or a saved baseline. Two commands are different. **`top` prints one column that is a name: the directory under `~/.claude/projects/`, which is your working directory with its separators flattened.** On a machine that does client work, the client's name is in that path, so it is in that column. **`errors` prints the first line of each tool error**, which is raw tool output and can quote a path, a URL or a token (`errors --json` never includes it).
 
-So `nenpi top --anonymize` replaces it with `proj-<8 hex>`, stable across runs so rows stay comparable. Without the flag, `top` says so in a line under the table. This hides a name from a reader; it will not stop someone who already has a list of candidate names and hashes them — it is a guard against pasting, not a guarantee of anonymity.
+So `--anonymize` covers both: `nenpi top --anonymize` replaces the column with `proj-<8 hex>`, stable across runs so rows stay comparable, and `nenpi errors --anonymize` leaves the error text out. Without the flag, each says so in a line. This hides a name from a reader; it will not stop someone who already has a list of candidate names and hashes them — it is a guard against pasting, not a guarantee of anonymity.
 
 ## How the numbers are made, and what is estimated
 
 Being straight about this matters more than the numbers looking precise.
 
-**Measured, from the transcripts:** `input`, `output`, `cache_read`, `cache_creation` token counts; tool call counts; timestamps; hook durations; `is_error` flags; compaction events. Dollar figures printed in `quality` as "measured cost-state total" come from Claude Code's own `costUSD`, not from a model of ours.
+**Measured, from the transcripts:** `input`, `output`, `cache_read`, `cache_creation` token counts; tool call counts; timestamps; hook durations; `is_error` flags; compaction events. `--days` keeps the lines whose timestamp falls inside the window, and a subagent's transcript (`<session>/subagents/*.jsonl`) counts toward the session that started it. Dollar figures printed in `quality` as "measured cost-state total" come from Claude Code's own `costUSD`, not from a model of ours.
 
 **Estimated:**
 
-- **`BYTES_PER_TOK = 3.5`** — tool output is measured in bytes and converted to tokens with this ratio. It is a rough average for mixed Japanese and English; adjust your reading of `injected` and residency accordingly.
+- **`BYTES_PER_TOK = 3.5`** — tool output is measured in UTF-8 bytes and converted to tokens with this ratio. It is a rough average for mixed Japanese and English; adjust your reading of `injected` and residency accordingly.
 - **`IMG_TOK = 1600`** — one image block is counted as this many tokens.
 - **Weights `W = { in: 1, write: 1.25, read: 0.1, out: 5 }`** — token classes are converted to "input-token equivalents" so a single number can rank them. These follow Anthropic's published price ratios. `quality` prints a **calibration residual**: it derives a unit price from the real `costUSD` and reports how far off the weighted model is. On the author's machine that residual runs around 1%. If yours is large, the weights do not match your plan and the weighted percentages should be read as rough.
 
@@ -239,14 +239,14 @@ Bash の出力は本文としては 2.4M tok だが、滞在コストは 1669M�
 
 外には何も出ない。ソースのどこにも `fetch` も `node:http` も `child_process` も無く、依存パッケージが無いので後から生える口も無い。読むのは `~/.claude/projects/` の JSONL、書くのは `~/.claude/nenpi/`（保存した基準と、口出しのクールダウン）だけ。
 
-知っておく価値があるのはツールではなく**出力のほう**。`report` / `quality` / `effect` / `errors` はツール名と数字しか出さない。**`top` だけは名前の列を持つ——`~/.claude/projects/` のディレクトリ名で、これは作業ディレクトリのパスを区切り文字ごと潰したもの。**客先の仕事をしている PC なら、そのパスに客先名が入っている。
+知っておく価値があるのはツールではなく**出力のほう**。`report` / `quality` / `effect` はツール名・フック名と数字しか出さない。フックはスクリプト名とサブコマンド（`redline hook pre`）で名乗り、引数は捨てるので、コマンド行に渡した認証情報が `--json` や保存した基準に入ることはない。例外は2つ。**`top` は名前の列を持つ——`~/.claude/projects/` のディレクトリ名で、これは作業ディレクトリのパスを区切り文字ごと潰したもの。**客先の仕事をしている PC なら、そのパスに客先名が入っている。**`errors` はツールのエラー文の先頭を出す。**ツールの出力そのままなので、パスや URL や認証情報が混ざり得る（`errors --json` には入らない）。
 
-そこで `nenpi top --anonymize` はこの列を `proj-<8桁>` に置き換える。同じ名前は毎回同じ値になるので、実行をまたいで行を突き合わせられる。付けなかった場合は表の下に一行そう書く。これは**読み手から名前を隠す**もので、候補の名前を持っている相手が総当たりでハッシュを突き合わせるのは防げない。貼り付け事故に対する備えであって、匿名性の保証ではない。
+そこで `--anonymize` を付けると、`nenpi top` はこの列を `proj-<8桁>` に置き換え（同じ名前は毎回同じ値になるので、実行をまたいで行を突き合わせられる）、`nenpi errors` はエラー文を出さない。付けなかった場合はそれぞれ一行そう書く。これは**読み手から名前を隠す**もので、候補の名前を持っている相手が総当たりでハッシュを突き合わせるのは防げない。貼り付け事故に対する備えであって、匿名性の保証ではない。
 
 ## 実測と推定の線引き
 
-- **実測**：`usage` のトークン数、ツール呼び出し回数、時刻、フックの所要時間、`is_error`、compact の発生。`quality` の「実測 cost-state 合計」は Claude Code 自身の `costUSD`。
-- **推定**：`BYTES_PER_TOK = 3.5`（バイト→トークン換算）、`IMG_TOK = 1600`（画像1枚）、重み `W = { in: 1, write: 1.25, read: 0.1, out: 5 }`（入力トークン換算）。
+- **実測**：`usage` のトークン数、ツール呼び出し回数、時刻、フックの所要時間、`is_error`、compact の発生。`--days` は行の時刻で窓に入る分だけを数え、サブエージェントの記録（`<session>/subagents/*.jsonl`）は呼び出したセッションの消費に含める。`quality` の「実測 cost-state 合計」は Claude Code 自身の `costUSD`。
+- **推定**：`BYTES_PER_TOK = 3.5`（UTF-8 のバイト→トークン換算）、`IMG_TOK = 1600`（画像1枚）、重み `W = { in: 1, write: 1.25, read: 0.1, out: 5 }`（入力トークン換算）。
 
 つまり **課金値は `usage` から実測、帰属の按分は推定**。滞在コストは推定側にある。それでもこの数字がいちばん役に立つのは、「どの出力が高いのか」を指せるものが他に無いからで、推定だと承知の上で読むのが正しい。
 
